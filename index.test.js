@@ -1,7 +1,8 @@
 "use strict"
 const test = require("node:test")
 const assert = require("node:assert/strict")
-const { deadPickPaths, pickAtPath, pictureState } = require("./index")
+const contract = require("./index")
+const { deadPickPaths, pickAtPath, pictureState, VENUE_IMAGE_PROVIDERS } = contract
 
 const g = (ref, extra = {}) => ({ source: "google", photoName: `places/P/photos/${ref}/media`, ...extra })
 const site = (u = "https://venue.example/hero.jpg") => ({ source: "site", url: u })
@@ -119,4 +120,36 @@ test("pictureState: the three states are exhaustive and never overlap", () => {
     { primary: g("A"), gallery: [], photoNamesUnmatched: [mark("primary", "A")] },
   ]
   assert.deepEqual(cases.map((c) => pictureState(c).state), ["ok", "stale", "none"])
+})
+
+// ————————————————————————— VENUE_IMAGE_PROVIDERS —————————————————————————
+
+test("VENUE_IMAGE_PROVIDERS: exactly these four, in this order", () => {
+  // Order is part of the contract: consumers echo the list in enums and validation messages.
+  assert.deepEqual(VENUE_IMAGE_PROVIDERS, ["google_places", "site", "manual", "wikipedia"])
+})
+
+test("VENUE_IMAGE_PROVIDERS: the ops-console SOURCE spelling `google` is NOT a provider", () => {
+  // The console picker says "google"; the wire says "google_places". Consumers must map, not assume.
+  assert.ok(!VENUE_IMAGE_PROVIDERS.includes("google"))
+  assert.ok(VENUE_IMAGE_PROVIDERS.includes("google_places"))
+})
+
+test("VENUE_IMAGE_PROVIDERS: frozen — a consumer cannot mutate the shared list", () => {
+  assert.equal(Object.isFrozen(VENUE_IMAGE_PROVIDERS), true)
+  assert.throws(() => VENUE_IMAGE_PROVIDERS.push("stray"), TypeError)
+  assert.throws(() => (VENUE_IMAGE_PROVIDERS[0] = "stray"), TypeError)
+  assert.deepEqual(VENUE_IMAGE_PROVIDERS, ["google_places", "site", "manual", "wikipedia"])
+})
+
+// ————————————————————————— the export surface —————————————————————————
+
+test("the export surface is the three rule functions plus the provider list, unchanged", () => {
+  assert.deepEqual(Object.keys(contract).sort(), [
+    "VENUE_IMAGE_PROVIDERS",
+    "deadPickPaths",
+    "pickAtPath",
+    "pictureState",
+  ])
+  for (const fn of [deadPickPaths, pickAtPath, pictureState]) assert.equal(typeof fn, "function")
 })

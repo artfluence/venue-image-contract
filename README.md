@@ -25,14 +25,29 @@ Google answers an expired reference with `400 INVALID_ARGUMENT`, which the API s
 
 Paths address picks by **array position** (`primary`, `gallery.<i>`), never by the pick's `order` field. `order` is the operator's display ordering; measured against real data, it agrees with array position barely more often than chance.
 
+## The provider vocabulary
+
+Where a venue image came from, spelled the one way a seed file writes it, a live venue document stores it, and the API wire carries it:
+
+```js
+VENUE_IMAGE_PROVIDERS // frozen ["google_places", "site", "manual", "wikipedia"]
+```
+
+This is **not** the ops-console **source** vocabulary. The Command Center's operator-facing picker says `google` / `site` / `manual` / `wikipedia`, and its `google` maps onto `google_places`; the other three match. A consumer crossing between the two must map, never assume the spellings agree.
+
+The list is frozen and its order is part of the contract — consumers echo it in enum declarations and validation messages.
+
+It lives here because on **2026-08-17 the brussels promote died on a stray fourth copy** of it (control-center#105). Three copies were being kept in step by hand; the fourth was not, and it rejected a provider the others accepted. A copied vocabulary drifts exactly like a copied rule, so it now sits beside the rule.
+
 ## API
 
 ```js
-const { deadPickPaths, pickAtPath, pictureState } = require("@artfluence/venue-image-contract")
+const { deadPickPaths, pickAtPath, pictureState, VENUE_IMAGE_PROVIDERS } = require("@artfluence/venue-image-contract")
 
 deadPickPaths(review)    // Set<"primary" | "gallery.<i>">
 pickAtPath(review, path) // ImagePick | null
 pictureState(review)     // { state, dead, survivingGalleryPaths, primaryDead }
+VENUE_IMAGE_PROVIDERS    // readonly ["google_places", "site", "manual", "wikipedia"]
 ```
 
 `pictureState` returns the same question phrased for each consumer:
@@ -48,7 +63,7 @@ pictureState(review)     // { state, dead, survivingGalleryPaths, primaryDead }
 ## Consuming it
 
 ```json
-{ "dependencies": { "@artfluence/venue-image-contract": "github:artfluence/venue-image-contract#v1.0.0" } }
+{ "dependencies": { "@artfluence/venue-image-contract": "github:artfluence/venue-image-contract#v1.1.0" } }
 ```
 
 No registry, no publish step. Pin a tag — an unpinned dependency reintroduces drift by the back door.

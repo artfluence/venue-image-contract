@@ -33,6 +33,29 @@
 /** @typedef {{source?: string, photoName?: string|null, url?: string|null, order?: number}} ImagePick */
 /** @typedef {{path?: string, photoName?: string, reason?: string}} UnmatchedEntry */
 /** @typedef {{primary?: ImagePick|null, gallery?: ImagePick[]|null, photoNamesUnmatched?: UnmatchedEntry[]|null}} ReviewLike */
+/** @typedef {"google_places"|"site"|"manual"|"wikipedia"} VenueImageProvider */
+
+/**
+ * The PROVIDER vocabulary: where a venue image came from, as written into a seed file, stored on a
+ * live venue document, and sent over the API wire. Frozen, and ORDER-SIGNIFICANT — consumers echo
+ * this list in validation messages and enum declarations.
+ *
+ * NOT the ops-console SOURCE vocabulary. The Command Center's operator-facing picker says
+ * "google" / "site" / "manual" / "wikipedia", and its `google` maps onto this list's
+ * `google_places`; the other three are spelled the same on both sides. The two vocabularies stay
+ * separate on purpose — one is what an operator clicks, the other is what a document and a wire
+ * payload carry — so a consumer translating between them must map, never assume equality.
+ *
+ * CONSUMERS. control-center (seed validation + the explore doc), city-scraper (seed schema),
+ * artfluence-API (its `VenueImageProvider` type and the promote DTO).
+ *
+ * WHY IT MOVED HERE. On 2026-08-17 the brussels promote died on a stray FOURTH copy of this list
+ * (control-center#105): three copies had been kept in step by hand, the fourth had not, and it
+ * rejected a provider the others accepted. Copies of a vocabulary drift exactly like copies of a
+ * rule do, so this one lives beside the rule instead — one list, one tag, one bump per consumer.
+ * @type {readonly VenueImageProvider[]}
+ */
+const VENUE_IMAGE_PROVIDERS = Object.freeze(["google_places", "site", "manual", "wikipedia"])
 
 const GALLERY_PATH = /^gallery\.(\d+)$/
 
@@ -105,4 +128,4 @@ function pictureState(review) {
   return { state, dead: [...dead], survivingGalleryPaths, primaryDead }
 }
 
-module.exports = { deadPickPaths, pickAtPath, pictureState }
+module.exports = { deadPickPaths, pickAtPath, pictureState, VENUE_IMAGE_PROVIDERS }
