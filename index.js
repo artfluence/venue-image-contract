@@ -93,6 +93,93 @@ function deadPickPaths(review) {
   return dead
 }
 
+const GOOGLE_SOURCES = new Set(["google", "google_places"])
+
+/** A non-empty string, or `null` — the one shape a reference is allowed to take. */
+function refString(value) {
+  return typeof value === "string" && value.length > 0 ? value : null
+}
+
+/**
+ * The reference a pick is addressed BY — the one string a live venue document holds for the image
+ * this pick chose, so that a pick and a live image can be compared without either side guessing.
+ *
+ *   google (`google` in the ops console, `google_places` on the wire) → `photoName`
+ *   site / manual / wikipedia                                         → `url`
+ *
+ * A google pick is NEVER addressed by a url it happens to carry: its identity is the photoName, and
+ * any url beside it is a rendering of that name, which changes on every renewal. A pick with no
+ * recorded source falls back on whichever reference it carries, so a half-written document resolves
+ * instead of vanishing. `null` when there is no usable reference at all.
+ * @param {ImagePick|null|undefined} pick
+ * @returns {string|null}
+ */
+function pickRef(pick) {
+  if (!pick || typeof pick !== "object") return null
+  const source = typeof pick.source === "string" ? pick.source : ""
+  if (GOOGLE_SOURCES.has(source)) return refString(pick.photoName)
+  if (source) return refString(pick.url)
+  return refString(pick.photoName) || refString(pick.url)
+}
+
+/**
+ * The dead paths a REVIEW QUEUE should still act on, given what the live venue actually shows.
+ *
+ * THE PROBLEM. Once a venue is promoted, its live document — not the review — decides what users
+ * see. An operator's review can hold dead picks the live venue never adopted, or dropped long ago.
+ * Queueing those asks an operator to re-pick an image nobody is looking at, and blocks the promote
+ * gate on a defect with no user-visible symptom.
+ *
+ * THE RULE. `shownRefs` is the set of references the live venue currently shows, built with
+ * {@link pickRef}'s vocabulary. A dead path survives only when its pick's ref is in that set. A
+ * promoted venue that shows nothing (tombstoned: the live document exists, carries no image) passes
+ * an EMPTY set and suppresses all of its dead picks — there is nothing on screen to repair.
+ *
+ * BUILDING `shownRefs`. Key the live document's image entries the way {@link pickRef} keys a pick,
+ * which is symmetric because the fold copies `photoName` and `url` onto a live entry VERBATIM:
+ * `img.provider === "google_places" ? img.photoName : img.url`, over the live `image` and `images`.
+ * Keying live images as `photoName ?? url` agrees for every shape a real pick takes, but disagrees
+ * on a pick carrying both, so prefer the provider-aware form — it is the same rule on both sides.
+ *
+ * FAIL OPEN. `null` / `undefined` means "no live document to compare against" — the venue is not
+ * promoted, or the caller could not load it — and every dead path is returned unchanged. Suppression
+ * requires positive evidence of what is shown; absence of evidence queues the work.
+ *
+ * QUEUE ONLY. This MUST NEVER feed the image fold or {@link pictureState}. Both compute what a venue
+ * SERVES, and `shownRefs` is derived from that same live document: routing this back into them makes
+ * the fold's input depend on its own output, and a promoted venue would re-serve the very reference
+ * that is dead. Folds and serving read {@link deadPickPaths}; queues and the promote gate read this.
+ *
+ * @param {ReviewLike} review
+ * @param {Set<string>|Iterable<string>|null|undefined} shownRefs refs the LIVE venue shows; `null` when not promoted
+ * @returns {Set<string>}
+ */
+function queueDeadPickPaths(review, shownRefs) {
+  const dead = deadPickPaths(review)
+  const shown = toRefSet(shownRefs)
+  if (!shown) return dead
+  const queued = new Set()
+  for (const path of dead) {
+    const ref = pickRef(pickAtPath(review, path))
+    if (ref !== null && shown.has(ref)) queued.add(path)
+  }
+  return queued
+}
+
+/**
+ * `shownRefs` as something with a `has`, or `null` for "no live document" — which includes a value
+ * that is neither a set nor iterable, because reading junk as "shows nothing" would silently
+ * suppress a live venue's whole queue.
+ */
+function toRefSet(shownRefs) {
+  if (shownRefs === null || shownRefs === undefined) return null
+  if (shownRefs instanceof Set) return shownRefs
+  if (typeof shownRefs === "object" && typeof shownRefs[Symbol.iterator] === "function") {
+    return new Set(shownRefs)
+  }
+  return null
+}
+
 /** A pick is servable when it is present and its reference is not dead. */
 function isServable(pick, path, dead) {
   return !!pick && !dead.has(path)
@@ -128,4 +215,4 @@ function pictureState(review) {
   return { state, dead: [...dead], survivingGalleryPaths, primaryDead }
 }
 
-module.exports = { deadPickPaths, pickAtPath, pictureState, VENUE_IMAGE_PROVIDERS }
+module.exports = { deadPickPaths, pickAtPath, pickRef, pictureState, queueDeadPickPaths, VENUE_IMAGE_PROVIDERS }

@@ -46,3 +46,27 @@ export type VenueImageProvider = (typeof VENUE_IMAGE_PROVIDERS)[number]
 export function pickAtPath(review: ReviewLike, path: string): ImagePick | null
 export function deadPickPaths(review: ReviewLike): Set<string>
 export function pictureState(review: ReviewLike): PictureStateResult
+
+/**
+ * The reference a pick is addressed BY, in the vocabulary a live venue document holds:
+ * google (`google` / `google_places`) → `photoName`, site / manual / wikipedia → `url`.
+ * A google pick is never addressed by a url beside it. `null` when there is no usable reference.
+ */
+export function pickRef(pick: ImagePick | null | undefined): string | null
+
+/**
+ * The dead paths a REVIEW QUEUE should still act on, given what the live venue shows.
+ *
+ * `shownRefs` is the set of refs the live venue currently shows, in `pickRef`'s vocabulary; a dead
+ * path survives only when its pick's ref is in it. An empty set is a promoted, tombstoned venue and
+ * suppresses everything. `null` / `undefined` means no live document to compare against — not
+ * promoted, or not loaded — and fails OPEN, returning `deadPickPaths` unchanged.
+ *
+ * QUEUE ONLY. Never feed this to the image fold or to `pictureState`: `shownRefs` is derived from
+ * the fold's own output, so routing it back makes the fold's input depend on itself and re-serves a
+ * dead reference. Serving reads `deadPickPaths`; queues and the promote gate read this.
+ */
+export function queueDeadPickPaths(
+  review: ReviewLike,
+  shownRefs?: Set<string> | Iterable<string> | null,
+): Set<string>
