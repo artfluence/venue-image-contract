@@ -93,7 +93,11 @@ function deadPickPaths(review) {
   return dead
 }
 
-const GOOGLE_SOURCES = new Set(["google", "google_places"])
+/** Google in the ops-console PICK vocabulary. Its live-document twin is `google_places`. */
+const GOOGLE_PICK_SOURCE = "google"
+
+/** Google in the live-document PROVIDER vocabulary. Its pick-side twin is `google`. */
+const GOOGLE_PROVIDER = "google_places"
 
 /** A non-empty string, or `null` — the one shape a reference is allowed to take. */
 function refString(value) {
@@ -101,25 +105,56 @@ function refString(value) {
 }
 
 /**
- * The reference a pick is addressed BY — the one string a live venue document holds for the image
- * this pick chose, so that a pick and a live image can be compared without either side guessing.
+ * The ref an entry is addressed by, given which of its two vocabularies names Google. Google is
+ * addressed by `photoName`, everything else by `url`; a tag the caller did not record at all falls
+ * back on whichever ref the entry carries, so a half-written document resolves instead of vanishing.
+ */
+function refOf(entry, tag, googleTag) {
+  if (!entry || typeof entry !== "object") return null
+  const name = typeof tag === "string" ? tag : ""
+  if (name === googleTag) return refString(entry.photoName)
+  if (name) return refString(entry.url)
+  return refString(entry.photoName) || refString(entry.url)
+}
+
+/**
+ * The reference a REVIEW PICK is addressed BY — the one string a live venue document holds for the
+ * image this pick chose, so a pick and a live image can be compared without either side guessing.
  *
- *   google (`google` in the ops console, `google_places` on the wire) → `photoName`
- *   site / manual / wikipedia                                         → `url`
+ *   google (the ops-console SOURCE spelling)  → `photoName`
+ *   site / manual / wikipedia                 → `url`
  *
  * A google pick is NEVER addressed by a url it happens to carry: its identity is the photoName, and
- * any url beside it is a rendering of that name, which changes on every renewal. A pick with no
- * recorded source falls back on whichever reference it carries, so a half-written document resolves
- * instead of vanishing. `null` when there is no usable reference at all.
+ * any url beside it is a rendering of that name, which changes on every renewal. `null` when there
+ * is no usable reference at all.
+ *
+ * This reads the PICK vocabulary only. `google_places` is the live document's spelling, not a pick
+ * source, and is not quietly accepted here — the two vocabularies stay separate exactly as the
+ * provider list above says they do. For the live-document side use {@link liveImageRef}.
  * @param {ImagePick|null|undefined} pick
  * @returns {string|null}
  */
 function pickRef(pick) {
-  if (!pick || typeof pick !== "object") return null
-  const source = typeof pick.source === "string" ? pick.source : ""
-  if (GOOGLE_SOURCES.has(source)) return refString(pick.photoName)
-  if (source) return refString(pick.url)
-  return refString(pick.photoName) || refString(pick.url)
+  return refOf(pick, pick && pick.source, GOOGLE_PICK_SOURCE)
+}
+
+/**
+ * The reference a LIVE VENUE IMAGE is addressed by — `liveImageRef` is to a promoted document what
+ * {@link pickRef} is to a review, and the two agree on every photo because the fold copies
+ * `photoName` and `url` onto a live entry verbatim.
+ *
+ *   google_places (the live/wire PROVIDER spelling) → `photoName`
+ *   site / manual / wikipedia                       → `url`
+ *
+ * This is how a caller builds the `shownRefs` that {@link queueDeadPickPaths} takes: map it over the
+ * live document's `image` and `images`, drop the nulls, collect a Set. Keying a live entry as
+ * `photoName ?? url` instead looks equivalent and is not — it disagrees on an entry carrying both,
+ * and a ref that disagrees suppresses a queue item that should have been raised.
+ * @param {{provider?: string, photoName?: string|null, url?: string|null}|null|undefined} img
+ * @returns {string|null}
+ */
+function liveImageRef(img) {
+  return refOf(img, img && img.provider, GOOGLE_PROVIDER)
 }
 
 /**
@@ -135,11 +170,16 @@ function pickRef(pick) {
  * promoted venue that shows nothing (tombstoned: the live document exists, carries no image) passes
  * an EMPTY set and suppresses all of its dead picks — there is nothing on screen to repair.
  *
- * BUILDING `shownRefs`. Key the live document's image entries the way {@link pickRef} keys a pick,
- * which is symmetric because the fold copies `photoName` and `url` onto a live entry VERBATIM:
- * `img.provider === "google_places" ? img.photoName : img.url`, over the live `image` and `images`.
- * Keying live images as `photoName ?? url` agrees for every shape a real pick takes, but disagrees
- * on a pick carrying both, so prefer the provider-aware form — it is the same rule on both sides.
+ * BUILDING `shownRefs`. Map {@link liveImageRef} over the live document's `image` AND `images`,
+ * dropping the nulls — the hero is a field of its own, and a document whose `images` array is
+ * missing or trimmed still shows it:
+ *
+ *     const shown = liveVenue
+ *       ? new Set([liveVenue.image, ...(liveVenue.images || [])].map(liveImageRef).filter(Boolean))
+ *       : null
+ *
+ * A ref that is not built this way is not a ref: pass anything else — a Map, a list of unkeyed live
+ * entries — and this fails OPEN rather than reading it as a venue showing nothing.
  *
  * FAIL OPEN. `null` / `undefined` means "no live document to compare against" — the venue is not
  * promoted, or the caller could not load it — and every dead path is returned unchanged. Suppression
@@ -167,17 +207,26 @@ function queueDeadPickPaths(review, shownRefs) {
 }
 
 /**
- * `shownRefs` as something with a `has`, or `null` for "no live document" — which includes a value
- * that is neither a set nor iterable, because reading junk as "shows nothing" would silently
- * suppress a live venue's whole queue.
+ * `shownRefs` as a Set of refs, or `null` for "no live document to compare against".
+ *
+ * `null` covers every value that is not an iterable OF REFS: not iterable at all, or iterable but
+ * yielding something else — a `Map` (which yields `[key, value]` pairs, never a ref), a list of live
+ * image entries someone forgot to key, a list with one stray blank. CONTENT is checked, not just
+ * shape, because the failure that matters is silent: reading a container the caller filled wrongly
+ * as "this venue shows nothing" suppresses its entire queue and reports nothing. Suppression is only
+ * ever allowed on positive evidence of what is shown, so anything doubtful fails OPEN.
+ *
+ * An EMPTY iterable is not doubtful — it is a promoted, tombstoned venue, and it suppresses.
  */
 function toRefSet(shownRefs) {
   if (shownRefs === null || shownRefs === undefined) return null
-  if (shownRefs instanceof Set) return shownRefs
-  if (typeof shownRefs === "object" && typeof shownRefs[Symbol.iterator] === "function") {
-    return new Set(shownRefs)
+  if (typeof shownRefs !== "object" || typeof shownRefs[Symbol.iterator] !== "function") return null
+  const refs = new Set()
+  for (const ref of shownRefs) {
+    if (refString(ref) === null) return null
+    refs.add(ref)
   }
-  return null
+  return refs
 }
 
 /** A pick is servable when it is present and its reference is not dead. */
@@ -215,4 +264,12 @@ function pictureState(review) {
   return { state, dead: [...dead], survivingGalleryPaths, primaryDead }
 }
 
-module.exports = { deadPickPaths, pickAtPath, pickRef, pictureState, queueDeadPickPaths, VENUE_IMAGE_PROVIDERS }
+module.exports = {
+  deadPickPaths,
+  liveImageRef,
+  pickAtPath,
+  pickRef,
+  pictureState,
+  queueDeadPickPaths,
+  VENUE_IMAGE_PROVIDERS,
+}
