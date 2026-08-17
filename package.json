@@ -1,7 +1,7 @@
 {
   "name": "@artfluence/venue-image-contract",
-  "version": "1.0.0",
-  "description": "The shared rule for which of a venue image review's picks hold a reference that can no longer be served.",
+  "version": "1.1.0",
+  "description": "The shared rule for which of a venue image review's picks hold a reference that can no longer be served, and the shared provider vocabulary those picks are written with.",
   "main": "index.js",
   "types": "index.d.ts",
   "files": ["index.js", "index.d.ts", "README.md"],

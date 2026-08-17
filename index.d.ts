@@ -31,6 +31,18 @@ export interface PictureStateResult {
   primaryDead: boolean
 }
 
+/**
+ * The PROVIDER vocabulary — where a venue image came from, as a seed file writes it, a live venue
+ * document stores it, and the API wire carries it. Frozen and order-significant.
+ *
+ * Distinct from the ops-console SOURCE vocabulary ("google" | "site" | "manual" | "wikipedia"),
+ * whose `google` maps onto `google_places`. Consumers: control-center (seed validation + explore
+ * doc), city-scraper (seed schema), artfluence-API (`VenueImageProvider` + promote DTO).
+ */
+export const VENUE_IMAGE_PROVIDERS: readonly ["google_places", "site", "manual", "wikipedia"]
+
+export type VenueImageProvider = (typeof VENUE_IMAGE_PROVIDERS)[number]
+
 export function pickAtPath(review: ReviewLike, path: string): ImagePick | null
 export function deadPickPaths(review: ReviewLike): Set<string>
 export function pictureState(review: ReviewLike): PictureStateResult
