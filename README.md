@@ -42,12 +42,18 @@ It lives here because on **2026-08-17 the brussels promote died on a stray fourt
 ## API
 
 ```js
-const { deadPickPaths, pickAtPath, pictureState, VENUE_IMAGE_PROVIDERS } = require("@artfluence/venue-image-contract")
+const {
+  deadPickPaths, liveImageRef, pickAtPath, pickRef, pictureState, queueDeadPickPaths,
+  VENUE_IMAGE_PROVIDERS,
+} = require("@artfluence/venue-image-contract")
 
-deadPickPaths(review)    // Set<"primary" | "gallery.<i>">
-pickAtPath(review, path) // ImagePick | null
-pictureState(review)     // { state, dead, survivingGalleryPaths, primaryDead }
-VENUE_IMAGE_PROVIDERS    // readonly ["google_places", "site", "manual", "wikipedia"]
+deadPickPaths(review)                  // Set<"primary" | "gallery.<i>">
+pickAtPath(review, path)               // ImagePick | null
+pickRef(pick)                          // string | null — the ref a review pick is addressed by
+liveImageRef(img)                      // string | null — the ref a LIVE doc entry is addressed by
+pictureState(review)                   // { state, dead, survivingGalleryPaths, primaryDead }
+queueDeadPickPaths(review, shownRefs)  // Set<path> — the dead paths a QUEUE should still act on
+VENUE_IMAGE_PROVIDERS                  // readonly ["google_places", "site", "manual", "wikipedia"]
 ```
 
 `pictureState` returns the same question phrased for each consumer:
@@ -60,10 +66,49 @@ VENUE_IMAGE_PROVIDERS    // readonly ["google_places", "site", "manual", "wikipe
 
 `stale` and `none` are deliberately distinct: they are different jobs. A `stale` venue still shows an image; a `none` venue shows nothing and needs a source found.
 
+## Dead picks on a promoted venue
+
+Once a venue is **promoted**, its live document — not the review — decides what users see. A review can hold dead picks the live venue never adopted, or dropped long ago. Queueing those asks an operator to re-pick an image nobody is looking at, and blocks the promote gate on a defect with no user-visible symptom.
+
+`queueDeadPickPaths(review, shownRefs)` narrows `deadPickPaths` to the dead picks the live venue **actually shows**:
+
+```js
+const shownRefs = liveVenue
+  ? new Set([liveVenue.image, ...(liveVenue.images || [])].map(liveImageRef).filter(Boolean))
+  : null
+
+queueDeadPickPaths(review, shownRefs)
+```
+
+Both `image` and `images`: the hero is a field of its own, and a document whose `images` array is missing or trimmed still shows it.
+
+| `shownRefs` | means | result |
+|---|---|---|
+| `null` / `undefined` | not promoted, or the live doc could not be loaded | **every** dead path — fails open |
+| `new Set()` | promoted and tombstoned: a live doc with no image | **nothing** — there is nothing on screen to repair |
+| a set of refs | promoted, showing these | only the dead paths whose pick is among them |
+
+Each side has its own keying function, because each side has its own vocabulary:
+
+| | reads | google is spelled | google → | everything else → |
+|---|---|---|---|---|
+| `pickRef(pick)` | a review pick | `google` (ops-console **source**) | `photoName` | `url` |
+| `liveImageRef(img)` | a live document entry | `google_places` (**provider**) | `photoName` | `url` |
+
+They return the same string for the same photo, because the fold copies `photoName` and `url` onto a live entry verbatim. Neither accepts the other's spelling: `pickRef` on a `google_places`-tagged pick, or `liveImageRef` on a `google`-tagged entry, is a vocabulary mix-up and returns `null` rather than guessing.
+
+A google image is never addressed by a url beside it — its identity is the photoName, and a url next to it is a rendering that changes on every renewal. Keying a live entry as `photoName ?? url` agrees for every shape a real entry takes, but disagrees on one carrying both, so use `liveImageRef`.
+
+**Anything that is not an iterable of ref strings fails open.** A `Map` (which yields `[key, value]` pairs), a list of live entries someone forgot to key, a list with one stray blank — all read as "no live document", not as "shows nothing". Reading a wrongly-filled container as a tombstone would suppress a venue's whole queue in silence, which is the one outcome suppression must never reach by accident.
+
+Suppression is meaningful because a live document only changes when the venue is **promoted**: a reference that died after the last promote is still on screen, so it is queued; one the live document never adopted, or dropped at an earlier promote, is not.
+
+**This is a queue-side predicate only.** It must never feed the image fold or `pictureState`. Those compute what a venue *serves*, and `shownRefs` is derived from that same output — routing it back makes the fold's input depend on its own output, and the promoted venue re-serves the dead reference. Serving reads `deadPickPaths`; the review queue and the promote gate read `queueDeadPickPaths`.
+
 ## Consuming it
 
 ```json
-{ "dependencies": { "@artfluence/venue-image-contract": "github:artfluence/venue-image-contract#v1.1.0" } }
+{ "dependencies": { "@artfluence/venue-image-contract": "github:artfluence/venue-image-contract#v1.2.0" } }
 ```
 
 No registry, no publish step. Pin a tag — an unpinned dependency reintroduces drift by the back door.
