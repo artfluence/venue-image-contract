@@ -1,8 +1,22 @@
 name: test
 on:
   pull_request:
+    # Docs-only PRs must not burn CI. paths-ignore skips only when EVERY changed file matches,
+    # and a skipped run leaves the required check unreported — the `--admin` merge every PR here
+    # already takes (the author cannot self-approve) clears it.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   push:
     branches: [prod]
+
+# A superseded PR sync makes the in-flight run pointless — cancel it and let the newest win.
+# On any other event the group falls back to the ref and `cancel-in-progress` is false, so
+# nothing that deploys can be cancelled by this.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
