@@ -6,6 +6,7 @@ const {
   deadPickPaths, deadPickPathsByKind, liveImageRef, pickAtPath, pickRef, pictureState, queueDeadPickPaths,
   VENUE_IMAGE_PROVIDERS, GOOGLE_UNMATCHED_REASONS, GOOGLE_FETCH_ERROR_REASON_PREFIX,
   URL_DEAD_REASONS, URL_DEAD_REASON_PREFIX,
+  normalizePinFocus, pinFocusKey, pinCropRect, PIN_FOCUS_SCALE_MIN, PIN_FOCUS_SCALE_MAX,
 } = contract
 
 const g = (ref, extra = {}) => ({ source: "google", photoName: `places/P/photos/${ref}/media`, ...extra })
@@ -362,23 +363,41 @@ test("VENUE_IMAGE_PROVIDERS: frozen — a consumer cannot mutate the shared list
 
 // ————————————————————————— the export surface —————————————————————————
 
-test("the export surface is the rule functions, the provider list and the reason vocabularies", () => {
+test("the export surface is the rule functions, the vocabularies and the pin-focus math", () => {
   assert.deepEqual(Object.keys(contract).sort(), [
     "GOOGLE_FETCH_ERROR_REASON_PREFIX",
     "GOOGLE_UNMATCHED_REASONS",
+    "PIN_FOCUS_SCALE_MAX",
+    "PIN_FOCUS_SCALE_MIN",
     "URL_DEAD_REASONS",
     "URL_DEAD_REASON_PREFIX",
     "VENUE_IMAGE_PROVIDERS",
     "deadPickPaths",
     "deadPickPathsByKind",
     "liveImageRef",
+    "normalizePinFocus",
     "pickAtPath",
     "pickRef",
     "pictureState",
+    "pinCropRect",
+    "pinFocusKey",
     "queueDeadPickPaths",
   ])
-  const fns = [deadPickPaths, deadPickPathsByKind, liveImageRef, pickAtPath, pickRef, pictureState, queueDeadPickPaths]
+  const fns = [
+    deadPickPaths, deadPickPathsByKind, liveImageRef, pickAtPath, pickRef, pictureState, queueDeadPickPaths,
+    normalizePinFocus, pinFocusKey, pinCropRect,
+  ]
   for (const fn of fns) assert.equal(typeof fn, "function")
+})
+
+test("the v1.3.0 export surface survives the bump — pin focus is purely additive", () => {
+  for (const name of ["deadPickPathsByKind", "queueDeadPickPaths"]) assert.equal(typeof contract[name], "function", name)
+  assert.deepEqual(contract.URL_DEAD_REASONS, ["url_gone", "url_moved", "url_host_dead", "url_forbidden"])
+  assert.equal(contract.URL_DEAD_REASON_PREFIX, "url_")
+  // A pick carrying a pinFocus is the same pick to the dead-reference rule.
+  const r = { primary: g("A", { pinFocus: { x: 0.2, y: 0.4, scale: 2 } }), gallery: [], photoNamesUnmatched: [mark("primary", "A")] }
+  assert.deepEqual(paths(r), ["primary"])
+  assert.equal(pickRef(r.primary), g("A").photoName)
 })
 
 test("the v1.2.0 export surface survives the bump — every old export is still there, same kind", () => {
@@ -837,4 +856,183 @@ test("the reason vocabularies are DOCUMENTATION — the rule never validates a r
   assert.deepEqual(paths(google), ["primary"])
   const url = { primary: site(), gallery: [], urlPicksUnmatched: [{ path: "primary", url: SITE_URL, reason: "" }] }
   assert.deepEqual(paths(url), ["primary"])
+})
+
+// ————————————————————————— pin focus (v1.4.0) —————————————————————————
+
+test("PIN_FOCUS_SCALE_MIN / MAX: the zoom range a focal may carry is [1, 3]", () => {
+  assert.equal(PIN_FOCUS_SCALE_MIN, 1)
+  assert.equal(PIN_FOCUS_SCALE_MAX, 3)
+})
+
+test("normalizePinFocus: a valid focal comes back canonical, scale always spelled out", () => {
+  assert.deepEqual(normalizePinFocus({ x: 0.25, y: 0.75, scale: 2 }), { x: 0.25, y: 0.75, scale: 2 })
+  assert.deepEqual(normalizePinFocus({ x: 0.3, y: 0.5 }), { x: 0.3, y: 0.5, scale: 1 }, "missing scale = 1")
+  assert.deepEqual(normalizePinFocus({ x: 0.3, y: 0.5, scale: null }), { x: 0.3, y: 0.5, scale: 1 }, "null scale = 1")
+})
+
+test("normalizePinFocus: clamps x, y to [0, 1] and scale to [1, 3]", () => {
+  assert.deepEqual(normalizePinFocus({ x: -0.4, y: 1.7, scale: 9 }), { x: 0, y: 1, scale: 3 })
+  assert.deepEqual(normalizePinFocus({ x: 1.2, y: -3, scale: 0.5 }), { x: 1, y: 0, scale: 1 })
+  assert.deepEqual(normalizePinFocus({ x: 0.2, y: 0.5, scale: -2 }), { x: 0.2, y: 0.5, scale: 1 })
+})
+
+test("normalizePinFocus: rounds x, y to 3 dp and scale to 2 dp", () => {
+  assert.deepEqual(normalizePinFocus({ x: 0.12345, y: 0.98765, scale: 1.23456 }), { x: 0.123, y: 0.988, scale: 1.23 })
+  assert.deepEqual(normalizePinFocus({ x: 1 / 3, y: 2 / 3, scale: 7 / 3 }), { x: 0.333, y: 0.667, scale: 2.33 })
+})
+
+test("normalizePinFocus: never hands back a negative zero", () => {
+  const n = normalizePinFocus({ x: -0, y: -0.0001, scale: 1 })
+  assert.ok(Object.is(n.x, 0) && Object.is(n.y, 0), JSON.stringify(n))
+})
+
+test("normalizePinFocus: the DEFAULT focal (0.5, 0.5, 1) is stored as absent → null", () => {
+  assert.equal(normalizePinFocus({ x: 0.5, y: 0.5, scale: 1 }), null)
+  assert.equal(normalizePinFocus({ x: 0.5, y: 0.5 }), null)
+  // Default only AFTER rounding: a slider that lands a hair off centre is still the centre.
+  assert.equal(normalizePinFocus({ x: 0.5002, y: 0.4999, scale: 1.004 }), null)
+  // …and after clamping: scale below 1 is scale 1.
+  assert.equal(normalizePinFocus({ x: 0.5, y: 0.5, scale: 0.2 }), null)
+  // A centred focal that zooms in is NOT the default.
+  assert.deepEqual(normalizePinFocus({ x: 0.5, y: 0.5, scale: 1.5 }), { x: 0.5, y: 0.5, scale: 1.5 })
+})
+
+test("normalizePinFocus: garbage → null, never a throw", () => {
+  const garbage = [
+    null, undefined, 0, 1, "0.3,0.4", true, [], [0.3, 0.4], () => 0,
+    {}, { x: 0.3 }, { y: 0.3 }, { x: "0.3", y: 0.4 }, { x: 0.3, y: null },
+    { x: NaN, y: 0.4 }, { x: 0.3, y: Infinity }, { x: -Infinity, y: 0.4 },
+    { x: 0.3, y: 0.4, scale: NaN }, { x: 0.3, y: 0.4, scale: Infinity }, { x: 0.3, y: 0.4, scale: "2" },
+  ]
+  for (const input of garbage) {
+    assert.equal(normalizePinFocus(input), null, `expected null for ${String(input && JSON.stringify(input))}`)
+  }
+})
+
+test("normalizePinFocus: drops every key that is not x, y or scale", () => {
+  assert.deepEqual(normalizePinFocus({ x: 0.2, y: 0.4, scale: 2, forVersion: "v9", note: "x" }), { x: 0.2, y: 0.4, scale: 2 })
+})
+
+test("normalizePinFocus: idempotent — a normalized focal normalizes to itself", () => {
+  for (const f of [{ x: 0.12345, y: 0.9, scale: 2.345 }, { x: 0, y: 1, scale: 3 }, { x: 0.5, y: 0.5, scale: 1.01 }]) {
+    const once = normalizePinFocus(f)
+    assert.deepEqual(normalizePinFocus(once), once)
+  }
+})
+
+test("pinFocusKey: null, the default and garbage all key to the empty string", () => {
+  assert.equal(pinFocusKey(null), "")
+  assert.equal(pinFocusKey(undefined), "")
+  assert.equal(pinFocusKey({ x: 0.5, y: 0.5, scale: 1 }), "")
+  assert.equal(pinFocusKey({ x: 0.5, y: 0.5 }), "")
+  assert.equal(pinFocusKey({ x: "a", y: 0.5 }), "")
+})
+
+test("pinFocusKey: `f:${x},${y},${scale}` with the normalizer's rounding, scale always present", () => {
+  assert.equal(pinFocusKey({ x: 0.25, y: 0.75, scale: 2 }), "f:0.25,0.75,2")
+  assert.equal(pinFocusKey({ x: 0.3, y: 0.5 }), "f:0.3,0.5,1")
+  assert.equal(pinFocusKey({ x: 0.12345, y: 0.98765, scale: 1.23456 }), "f:0.123,0.988,1.23")
+  assert.equal(pinFocusKey({ x: -1, y: 2, scale: 5 }), "f:0,1,3")
+})
+
+test("pinFocusKey: BYTE-IDENTICAL for equal focals however they were spelled", () => {
+  // The API hashes this into the pin's coverVersion and the CC previews against it: two spellings
+  // of one focal must never key apart, or a venue re-cuts (and every device refetches) for nothing.
+  const spellings = [
+    { x: 0.2, y: 0.4, scale: 2 },
+    { x: 0.2000001, y: 0.39999, scale: 2.001 },
+    { scale: 2, y: 0.4, x: 0.2 },
+    { x: 0.2, y: 0.4, scale: 2, extra: "ignored" },
+    normalizePinFocus({ x: 0.2, y: 0.4, scale: 2 }),
+  ]
+  const keys = spellings.map(pinFocusKey)
+  for (const k of keys) assert.equal(Buffer.from(k).toString("hex"), Buffer.from("f:0.2,0.4,2").toString("hex"))
+})
+
+test("pinFocusKey: distinct focals key apart", () => {
+  const keys = [
+    { x: 0.2, y: 0.4 }, { x: 0.4, y: 0.2 }, { x: 0.2, y: 0.4, scale: 2 }, { x: 0.201, y: 0.4 },
+  ].map(pinFocusKey)
+  assert.equal(new Set(keys).size, keys.length)
+})
+
+test("pinCropRect: null focus → the centred square of a LANDSCAPE source", () => {
+  assert.deepEqual(pinCropRect(400, 300, null), { left: 50, top: 0, side: 300 })
+})
+
+test("pinCropRect: null focus → the centred square of a PORTRAIT source", () => {
+  assert.deepEqual(pinCropRect(300, 400, null), { left: 0, top: 50, side: 300 })
+})
+
+test("pinCropRect: a SQUARE source at scale 1 is the whole image, wherever the focal is", () => {
+  assert.deepEqual(pinCropRect(400, 400, null), { left: 0, top: 0, side: 400 })
+  assert.deepEqual(pinCropRect(400, 400, { x: 0.1, y: 0.9 }), { left: 0, top: 0, side: 400 })
+})
+
+test("pinCropRect: the default focal and garbage cut exactly what null cuts", () => {
+  const centre = pinCropRect(640, 427, null)
+  assert.deepEqual(pinCropRect(640, 427, { x: 0.5, y: 0.5, scale: 1 }), centre)
+  assert.deepEqual(pinCropRect(640, 427, { x: "left" }), centre)
+  assert.deepEqual(pinCropRect(640, 427, undefined), centre)
+})
+
+test("pinCropRect: the focal moves the square along the long side", () => {
+  // 400×300, side 300: centre x·400 − 150, clamped to [0, 100].
+  assert.deepEqual(pinCropRect(400, 300, { x: 0.4, y: 0.5 }), { left: 10, top: 0, side: 300 })
+  assert.deepEqual(pinCropRect(400, 300, { x: 0.6, y: 0.5 }), { left: 90, top: 0, side: 300 })
+  assert.deepEqual(pinCropRect(300, 400, { x: 0.5, y: 0.45 }), { left: 0, top: 30, side: 300 })
+})
+
+test("pinCropRect: edges clamp — x = 0 and x = 1 pin the square to the image's edge", () => {
+  assert.deepEqual(pinCropRect(400, 300, { x: 0, y: 0.5 }), { left: 0, top: 0, side: 300 })
+  assert.deepEqual(pinCropRect(400, 300, { x: 1, y: 0.5 }), { left: 100, top: 0, side: 300 })
+  assert.deepEqual(pinCropRect(300, 400, { x: 0.5, y: 0 }), { left: 0, top: 0, side: 300 })
+  assert.deepEqual(pinCropRect(300, 400, { x: 0.5, y: 1 }), { left: 0, top: 100, side: 300 })
+  // Out-of-range input clamps through the normalizer first, so it lands on the same edge.
+  assert.deepEqual(pinCropRect(400, 300, { x: -5, y: 0.5 }), { left: 0, top: 0, side: 300 })
+  assert.deepEqual(pinCropRect(400, 300, { x: 7, y: 0.5 }), { left: 100, top: 0, side: 300 })
+})
+
+test("pinCropRect: scale 3 cuts a third of the short side, centred on the focal", () => {
+  // 400×300 → side floor(300 / 3) = 100; centre (0.25·400, 0.6·300) = (100, 180) → (50, 130).
+  assert.deepEqual(pinCropRect(400, 300, { x: 0.25, y: 0.6, scale: 3 }), { left: 50, top: 130, side: 100 })
+  assert.deepEqual(pinCropRect(400, 300, { x: 0.5, y: 0.5, scale: 3 }), { left: 150, top: 100, side: 100 })
+  // Scale above 3 is 3, and a zoomed square still clamps at the corner.
+  assert.deepEqual(pinCropRect(400, 300, { x: 1, y: 1, scale: 10 }), { left: 300, top: 200, side: 100 })
+  assert.deepEqual(pinCropRect(400, 300, { x: 0, y: 0, scale: 3 }), { left: 0, top: 0, side: 100 })
+})
+
+test("pinCropRect: side floors, and a fractional scale stays integral", () => {
+  // 400×301 at scale 1.5: floor(301 / 1.5) = 200.
+  const r = pinCropRect(400, 301, { x: 0.333, y: 0.5, scale: 1.5 })
+  assert.equal(r.side, 200)
+  for (const v of Object.values(r)) assert.ok(Number.isInteger(v), JSON.stringify(r))
+})
+
+test("pinCropRect: integer output inside the image, never NaN, for every source ≥ 1 px", () => {
+  const sizes = [[1, 1], [1, 9], [9, 1], [2, 2], [3, 7], [96, 96], [400, 266], [266, 400], [4032, 3024], [401, 400]]
+  const focals = [null, { x: 0, y: 0 }, { x: 1, y: 1, scale: 3 }, { x: 0.123, y: 0.877, scale: 2.71 }, { x: 0.5, y: 0.5, scale: 3 }]
+  for (const [w, h] of sizes) {
+    for (const f of focals) {
+      const { left, top, side } = pinCropRect(w, h, f)
+      const at = `${w}×${h} ${JSON.stringify(f)}`
+      for (const v of [left, top, side]) assert.ok(Number.isInteger(v) && !Object.is(v, -0), at)
+      assert.ok(side >= 1 && side <= Math.min(w, h), at)
+      assert.ok(left >= 0 && left + side <= w, at)
+      assert.ok(top >= 0 && top + side <= h, at)
+    }
+  }
+})
+
+test("pinCropRect: a tiny source at scale 3 still cuts at least one pixel", () => {
+  // Centre (1, 1) sits on a pixel boundary: round(1 − 0.5) = 1, the lower-right of the four.
+  assert.deepEqual(pinCropRect(2, 2, { x: 0.5, y: 0.5, scale: 3 }), { left: 1, top: 1, side: 1 })
+  assert.deepEqual(pinCropRect(1, 1, { x: 1, y: 1, scale: 3 }), { left: 0, top: 0, side: 1 })
+})
+
+test("pinCropRect: width or height below 1 is a RangeError — the one throw in the pin-focus API", () => {
+  for (const [w, h] of [[0, 300], [400, 0], [-1, 300], [0.5, 300], [NaN, 300], [400, Infinity], ["400", 300], [undefined, 300]]) {
+    assert.throws(() => pinCropRect(w, h, null), RangeError, `${w}×${h}`)
+  }
 })

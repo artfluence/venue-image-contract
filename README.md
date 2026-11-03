@@ -128,6 +128,7 @@ const {
   deadPickPaths, deadPickPathsByKind, liveImageRef, pickAtPath, pickRef, pictureState,
   queueDeadPickPaths, VENUE_IMAGE_PROVIDERS,
   GOOGLE_UNMATCHED_REASONS, GOOGLE_FETCH_ERROR_REASON_PREFIX, URL_DEAD_REASONS, URL_DEAD_REASON_PREFIX,
+  normalizePinFocus, pinFocusKey, pinCropRect, PIN_FOCUS_SCALE_MIN, PIN_FOCUS_SCALE_MAX,
 } = require("@artfluence/venue-image-contract")
 
 deadPickPaths(review)                  // Set<"primary" | "gallery.<i>"> — dead by EITHER marker
@@ -140,6 +141,10 @@ queueDeadPickPaths(review, shownRefs)  // Set<path> — the dead paths a QUEUE s
 VENUE_IMAGE_PROVIDERS                  // readonly ["google_places", "site", "manual", "wikipedia"]
 GOOGLE_UNMATCHED_REASONS               // readonly — plus the open-ended `fetch_error:<detail>`
 URL_DEAD_REASONS                       // readonly — every one prefixed `url_`
+normalizePinFocus(input)               // PinFocus | null — canonical focal; default and garbage → null
+pinFocusKey(focus)                     // "" | "f:x,y,scale" — the focal's cache-key fragment
+pinCropRect(width, height, focus)      // { left, top, side } — the pin's square, integer px
+PIN_FOCUS_SCALE_MIN / _MAX             // 1 / 3
 ```
 
 `pictureState` and `queueDeadPickPaths` read `deadPickPaths`, so both inherit url-dead with no change of their own: a url-dead primary folds to `stale` or `none` exactly as a google-dead one does, and queues on a promoted venue exactly as one does.
@@ -193,10 +198,45 @@ Suppression is meaningful because a live document only changes when the venue is
 
 **This is a queue-side predicate only.** It must never feed the image fold or `pictureState`. Those compute what a venue *serves*, and `shownRefs` is derived from that same output — routing it back makes the fold's input depend on its own output, and the promoted venue re-serves the dead reference. Serving reads `deadPickPaths`; the review queue and the promote gate read `queueDeadPickPaths`.
 
+## Pin focus (v1.4.0)
+
+A venue's map pin is a circle cut from its cover photo. Ops choose **where** on the photo it is cut — a per-photo focal point set in the Command Center. The focal belongs to the photo, not the venue: it rides the approved pick as `ImagePick.pinFocus`, the folds carry it into the seed and the promote into the live venue's `image` / `images[]` entry, and a re-pick drops it with the pick it was set on.
+
+```js
+pinFocus: { x: 0.25, y: 0.6, scale: 2 }   // absent or null = the centred square at scale 1
+```
+
+| field | range | rounding | absent |
+|---|---|---|---|
+| `x`, `y` | `[0, 1]` of the **oriented** image (after EXIF auto-orient — the photo as a browser shows it) | 3 dp | required |
+| `scale` | `[1, 3]` — the square's side is the short side ÷ `scale` | 2 dp | `1` |
+
+**`normalizePinFocus(input)`** is the one canonical form. It clamps into range, rounds, always spells `scale` out and drops every other key. It returns `null` for `null` / `undefined`, a non-object, any non-finite or non-number field — and for the **default** `(0.5, 0.5, 1)`, judged after clamping and rounding. So the default is stored as **absent**: a pick that never had a focal and one reset to the centre are the same pick, and neither changes the pin's version. It never throws; garbage is the centre, because a malformed focal must not cost a venue its pin. A writer that should *refuse* bad input (the promote DTO) validates on its own side.
+
+**`pinFocusKey(focus)`** is the cache-key fragment: `""` when the focal normalizes to `null`, else `f:${x},${y},${scale}` of the normalized focal in JavaScript's shortest number spelling — `f:0.25,0.6,2`, never `0.250` or `2.00`. Equal focals give **byte-identical** keys however they were spelled. Build keys with it; never format the numbers by hand.
+
+**`pinCropRect(width, height, focus)`** is the cut, in integer pixels of the oriented source:
+
+```js
+side = max(1, floor(min(width, height) / scale))
+left = clamp(round(x · width  − side / 2), 0, width  − side)
+top  = clamp(round(y · height − side / 2), 0, height − side)
+```
+
+The focal is normalized first, so a `null`, default or malformed focal cuts the centred square, and an out-of-range one clamps. The square never leaves the image: a focal near an edge slides it flush against that edge. Fractional dimensions are floored. A `width` or `height` that is not a finite number ≥ 1 throws a `RangeError` — the only throw in the pin-focus API. `PIN_FOCUS_SCALE_MAX = 3` keeps the square at ≥ 100 px on the API's 400 × 300 source, so the 96 px pin is never upscaled.
+
+| consumer | uses |
+|---|---|
+| **API** | `pinCropRect` for the cut (auto-orient, extract, resize, mask); `pinFocusKey` appended to the pin's **coverVersion** input and blob key only when non-empty, so every pin cut before focals existed keeps its version |
+| **command-center** | `normalizePinFocus` on save in the focal editor; `pinCropRect` for the 32 pt preview; `pinFocusKey` to key it |
+| **city-scraper** | its image fold carries `pinFocus` into the seed exactly as the CC fold does — **parity** |
+
+The dead-reference rule ignores `pinFocus`: a pick carrying one is the same pick to `deadPickPaths`, `pickRef` and `pictureState`.
+
 ## Consuming it
 
 ```json
-{ "dependencies": { "@artfluence/venue-image-contract": "github:artfluence/venue-image-contract#v1.3.0" } }
+{ "dependencies": { "@artfluence/venue-image-contract": "github:artfluence/venue-image-contract#v1.4.0" } }
 ```
 
 No registry, no publish step. Pin a tag — an unpinned dependency reintroduces drift by the back door.
