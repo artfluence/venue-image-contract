@@ -47,7 +47,10 @@
  * drifting silently.
  */
 
-/** @typedef {{source?: string, photoName?: string|null, url?: string|null, order?: number}} ImagePick */
+/** @typedef {{x: number, y: number, scale?: number}} PinFocus */
+/** @typedef {{x: number, y: number, scale: number}} NormalizedPinFocus */
+/** @typedef {{source?: string, photoName?: string|null, url?: string|null, order?: number, pinFocus?: PinFocus|null}} ImagePick */
+/** @typedef {{left: number, top: number, side: number}} PinCropRect */
 /** @typedef {{path?: string, photoName?: string, reason?: string}} UnmatchedEntry */
 /** @typedef {{path?: string, url?: string, source?: string, reason?: string}} UrlUnmatchedEntry */
 /** @typedef {{primary?: ImagePick|null, gallery?: ImagePick[]|null, photoNamesUnmatched?: UnmatchedEntry[]|null, urlPicksUnmatched?: UrlUnmatchedEntry[]|null}} ReviewLike */
@@ -416,6 +419,274 @@ function pictureState(review) {
   return { state, dead: [...dead], survivingGalleryPaths, primaryDead }
 }
 
+// ————————————————————————— pin focus (v1.4.0) —————————————————————————
+//
+// WHY THIS LIVES HERE. A venue's map pin is a circle cut from its cover photo, and ops choose WHERE
+// on the photo it is cut — a per-photo focal point set in the Command Center and carried on the
+// approved pick (`ImagePick.pinFocus`) through the seed into the live venue image. Three places
+// must agree on that cut to the pixel and on its key to the byte:
+//   • the API cuts the pin and hashes the focal into the pin's coverVersion (a changed key re-cuts
+//     the pin and every device refetches it; a spurious change does that for nothing),
+//   • the Command Center previews the same square in its focal editor,
+//   • the city-scraper fold carries the focal into the seed exactly as the CC fold does.
+// Copies of a rule drift, and a drifted crop is a pin that does not show what ops chose — so the
+// math lives here, once.
+//
+// TWO READERS OF ONE SHAPE. `parsePinFocus` is for WRITERS (the CC action, the promote DTO): it
+// refuses a malformed or out-of-range focal and says which field. `normalizePinFocus` is for STORED
+// values (folds, the cut, keys): it never refuses, it clamps, and garbage reads as the centre —
+// a malformed stored focal must not cost a venue its pin.
+
+/** The smallest zoom a pin focal may carry: the largest square the photo holds. */
+const PIN_FOCUS_SCALE_MIN = 1
+
+/**
+ * The largest zoom a pin focal may carry: a square one third of the photo's short side. This is a
+ * ceiling on the DATA, not a resolution guarantee — on a 400 × 267 source scale 3 cuts 89 px, below
+ * the 96 px pin. {@link pinFocusScaleCap} is the per-source cap that keeps the cut ≥ the pin.
+ */
+const PIN_FOCUS_SCALE_MAX = 3
+
+/** The focal every pick without one is cut at — the centred square, unzoomed. */
+const PIN_FOCUS_CENTRE = Object.freeze({ x: 0.5, y: 0.5, scale: PIN_FOCUS_SCALE_MIN })
+
+/** Decimal places kept on x and y (≈ 0.4 px on a 400 px source) and on scale. */
+const PIN_FOCUS_XY_PLACES = 3
+const PIN_FOCUS_SCALE_PLACES = 2
+
+/** Scale is kept to 2 dp, so in hundredths it is an exact integer — the unit the side is floored in. */
+const SCALE_HUNDREDTHS = 10 ** PIN_FOCUS_SCALE_PLACES
+
+/** `parsePinFocus`'s reason when the input is not a plain object at all. */
+const NOT_AN_OBJECT = "not_an_object"
+
+/** A number that can be measured with: not NaN, not ±Infinity, not a numeric string. */
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value)
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+/**
+ * Rounds to `places` decimals as `Math.round(v · 10^p) / 10^p` — half-up on the BINARY product
+ * `v · 10^p`, not on the decimal spelling: 1.005 → 1 (1.005 · 100 = 100.4999…) and 1.015 → 1.01.
+ * Never `toFixed`, which rounds differently (2.505 → "2.50", here 2.51). The trailing `+ 0` turns
+ * a `-0` (which JSON.parse keeps, and the strict reader does not clamp away) into `+0`, so no `-0`
+ * escapes either reader. Part of the frozen key format — see {@link pinFocusKey}.
+ */
+function roundTo(value, places) {
+  const factor = 10 ** places
+  return Math.round(value * factor) / factor + 0
+}
+
+/**
+ * The largest pixel dimension the cut accepts: `min(w, h) · 100` must stay a safe integer, or the
+ * side overflows to Infinity (from ≈ 1.8e306) and loses integer precision well before that.
+ */
+const PIXEL_DIMENSION_MAX = Math.floor(Number.MAX_SAFE_INTEGER / SCALE_HUNDREDTHS)
+
+/**
+ * A pixel dimension in [1, {@link PIXEL_DIMENSION_MAX}], floored — or a RangeError. The message
+ * never coerces (a Symbol must not TypeError).
+ */
+function pixelDimension(value, fn, name) {
+  if (!isFiniteNumber(value) || value < 1) {
+    throw new RangeError(`${fn}: ${name} must be a finite number ≥ 1, got ${String(value)}`)
+  }
+  if (Math.floor(value) > PIXEL_DIMENSION_MAX) {
+    throw new RangeError(`${fn}: ${name} must be ≤ ${PIXEL_DIMENSION_MAX} (MAX_SAFE_INTEGER / 100), got ${String(value)}`)
+  }
+  return Math.floor(value)
+}
+
+/**
+ * The raw fields of a focal, type-checked but NOT range-checked: `{ok: true, fields}` (`fields` null
+ * for `null` / `undefined`) or `{ok: false, reason}` naming the first bad field. Every read is
+ * guarded — a throwing getter or a revoked Proxy is a bad field, never an escaping exception.
+ */
+function readPinFocusFields(input) {
+  if (input === null || input === undefined) return { ok: true, fields: null }
+  let field = NOT_AN_OBJECT
+  try {
+    if (typeof input !== "object" || Array.isArray(input)) return { ok: false, reason: NOT_AN_OBJECT }
+    field = "x"
+    const x = input.x
+    if (!isFiniteNumber(x)) return { ok: false, reason: field }
+    field = "y"
+    const y = input.y
+    if (!isFiniteNumber(y)) return { ok: false, reason: field }
+    field = "scale"
+    const scale = input.scale === undefined || input.scale === null ? PIN_FOCUS_SCALE_MIN : input.scale
+    if (!isFiniteNumber(scale)) return { ok: false, reason: field }
+    return { ok: true, fields: { x, y, scale } }
+  } catch {
+    return { ok: false, reason: field }
+  }
+}
+
+/** In-range fields → the canonical focal, or `null` when that is the default (judged after rounding). */
+function canonicalPinFocus({ x, y, scale }) {
+  const focus = {
+    x: roundTo(x, PIN_FOCUS_XY_PLACES),
+    y: roundTo(y, PIN_FOCUS_XY_PLACES),
+    scale: roundTo(scale, PIN_FOCUS_SCALE_PLACES),
+  }
+  const isCentre =
+    focus.x === PIN_FOCUS_CENTRE.x && focus.y === PIN_FOCUS_CENTRE.y && focus.scale === PIN_FOCUS_CENTRE.scale
+  return isCentre ? null : focus
+}
+
+/**
+ * The canonical form of a STORED pin focal, or `null` for "cut the centred square" — the lenient
+ * reader for folds, the cut and keys. Writers use {@link parsePinFocus}.
+ *
+ *   x, y   finite numbers, clamped to [0, 1], rounded to 3 dp — fractions of the ORIENTED image
+ *          (after EXIF auto-orient: the photo as a browser shows it, which is what ops click on)
+ *   scale  finite number, clamped to [1, 3], rounded to 2 dp; absent or `null` reads as 1
+ *
+ * The result always spells `scale` out and carries no other key.
+ *
+ * `null` for:
+ *   • the DEFAULT (0.5, 0.5, 1), judged AFTER clamping and rounding — so a default focal is stored as
+ *     absent, adds nothing to the pin's version, and a slider that lands a hair off centre is the
+ *     centre. A pick that never had a focal and one reset to the centre are the same pick.
+ *   • `null` / `undefined`, a non-object, an object whose x or y (or a present scale) is not a finite
+ *     number, or one whose reads throw. Garbage is the centre, never an error.
+ *
+ * `null` therefore means BOTH "default" and "garbage" here — the lenient form cannot tell them apart,
+ * which is exactly why writers validate with {@link parsePinFocus} instead.
+ *
+ * Never throws.
+ * @param {unknown} input
+ * @returns {NormalizedPinFocus|null}
+ */
+function normalizePinFocus(input) {
+  const read = readPinFocusFields(input)
+  if (!read.ok || !read.fields) return null
+  const { x, y, scale } = read.fields
+  return canonicalPinFocus({
+    x: clamp(x, 0, 1),
+    y: clamp(y, 0, 1),
+    scale: clamp(scale, PIN_FOCUS_SCALE_MIN, PIN_FOCUS_SCALE_MAX),
+  })
+}
+
+/**
+ * The STRICT reader, for writers — the CC set-focus action and the promote DTO. Same canonical form
+ * as {@link normalizePinFocus}, but it REFUSES instead of repairing:
+ *
+ *   `{ok: true, focus}`    a valid focal; `focus` is the canonical focal, or `null` for the default
+ *                          and for `null` / `undefined` (a reset is a valid write)
+ *   `{ok: false, reason}`  `"not_an_object"`, or the FIRST bad field — `"x"`, `"y"`, `"scale"` — in
+ *                          that order: not a finite number (a numeric string like `"2"` is bad, never
+ *                          coerced), out of range (x, y outside [0, 1], scale outside [1, 3]), or a
+ *                          read that throws
+ *
+ * Never throws.
+ * @param {unknown} input
+ * @returns {{ok: true, focus: NormalizedPinFocus|null} | {ok: false, reason: "not_an_object"|"x"|"y"|"scale"}}
+ */
+function parsePinFocus(input) {
+  const read = readPinFocusFields(input)
+  if (!read.ok) return read
+  if (!read.fields) return { ok: true, focus: null }
+  const { x, y, scale } = read.fields
+  if (x < 0 || x > 1) return { ok: false, reason: "x" }
+  if (y < 0 || y > 1) return { ok: false, reason: "y" }
+  if (scale < PIN_FOCUS_SCALE_MIN || scale > PIN_FOCUS_SCALE_MAX) return { ok: false, reason: "scale" }
+  return { ok: true, focus: canonicalPinFocus(read.fields) }
+}
+
+/**
+ * The canonical cache-key fragment of a pin focal: `""` when it normalizes to `null` (absent, the
+ * default, or garbage), else `f:${x},${y},${scale}` of the NORMALIZED focal, numbers in JavaScript's
+ * shortest round-trip spelling — `f:0.25,0.75,2`, `f:0.3,0.5,1`, never `0.300` or `2.00`.
+ *
+ * The API appends it to the pin's coverVersion input and blob key ONLY when it is non-empty; the CC
+ * keys its preview with it. Equal focals give BYTE-IDENTICAL keys however they were spelled, and a
+ * pick without a focal keys to nothing, so every pin cut before focals existed keeps its version.
+ * Build keys with this, never by formatting the numbers yourself.
+ *
+ * The format and its rounding are a FROZEN wire contract: changing either re-keys and re-cuts every
+ * focalled pin and makes every device refetch it — a MAJOR version, shipped with a bump of the API's
+ * `VENUE_PIN_RENDER_REV`.
+ * @param {unknown} focus
+ * @returns {string}
+ */
+function pinFocusKey(focus) {
+  const f = normalizePinFocus(focus)
+  return f ? `f:${f.x},${f.y},${f.scale}` : ""
+}
+
+/** Where a square of `side` starts on one axis so it centres on `at` (0..1), kept inside `length`. */
+function cropOffset(at, length, side) {
+  return clamp(Math.round(at * length - side / 2), 0, length - side)
+}
+
+/**
+ * The square a pin is cut from, in integer pixels of the ORIENTED source (`width` × `height` after
+ * EXIF auto-orient — the same space the focal was set in).
+ *
+ *   side = max(1, floor(min(width, height) · 100 / round(scale · 100)))
+ *   left = clamp(round(x·width − side/2), 0, width − side)
+ *   top  = clamp(round(y·height − side/2), 0, height − side)
+ *
+ * The side is floored in INTEGER hundredths, so it is exactly the largest square `scale` times which
+ * fits the short side — float division would put 535 / 1.07 at 499.99… and cut 499.
+ *
+ * The focal goes through {@link normalizePinFocus} first, so an out-of-range focal clamps and a
+ * `null`, default or malformed one cuts the CENTRED square. The square never leaves the image: a
+ * focal near an edge slides it flush against that edge rather than off it. It does NOT apply
+ * {@link pinFocusScaleCap} — the caller clamps the scale to the cap first when it wants one.
+ *
+ * Fractional dimensions are floored. A `width` or `height` that is not a finite number ≥ 1, or that
+ * is above `MAX_SAFE_INTEGER / 100` (≈ 9.007e13, where the integer side math stops being exact),
+ * throws a RangeError — there is no square to cut, and the caller has measured the wrong thing.
+ * @param {number} width
+ * @param {number} height
+ * @param {unknown} focus
+ * @returns {PinCropRect}
+ */
+function pinCropRect(width, height, focus) {
+  const w = pixelDimension(width, "pinCropRect", "width")
+  const h = pixelDimension(height, "pinCropRect", "height")
+  const f = normalizePinFocus(focus) || PIN_FOCUS_CENTRE
+  const scaleHundredths = Math.round(f.scale * SCALE_HUNDREDTHS)
+  const side = Math.max(1, Math.floor((Math.min(w, h) * SCALE_HUNDREDTHS) / scaleHundredths))
+  return { left: cropOffset(f.x, w, side), top: cropOffset(f.y, h, side), side }
+}
+
+/**
+ * The largest scale, on the 2 dp grid, that still cuts at least `minSidePx` pixels from a
+ * `width` × `height` source: floor(min(width, height) · 100 / minSidePx) / 100, clamped to [1, 3].
+ *
+ * FLOORED, not rounded: 133 / 96 = 1.385…, and 1.39 would cut floor(133 / 1.39) = 95 px. With the
+ * floor, {@link pinCropRect} at the cap cuts ≥ `minSidePx` whenever the short side has that many
+ * pixels; a smaller source caps at 1, its whole short side.
+ *
+ * `width` × `height` are the dimensions of the source the PIN IS CUT FROM (oriented), not of
+ * whatever copy an editor displays. The CC slider caps at `pinFocusScaleCap(w, h, 96)`, and the API
+ * clamps the stored scale to the same cap at cut time.
+ *
+ * Throws a RangeError for a `width` or `height` that is not a finite number ≥ 1 or is above
+ * `MAX_SAFE_INTEGER / 100`, or a `minSidePx` that is not a finite number > 0.
+ * @param {number} width
+ * @param {number} height
+ * @param {number} minSidePx
+ * @returns {number}
+ */
+function pinFocusScaleCap(width, height, minSidePx) {
+  const w = pixelDimension(width, "pinFocusScaleCap", "width")
+  const h = pixelDimension(height, "pinFocusScaleCap", "height")
+  if (!isFiniteNumber(minSidePx) || minSidePx <= 0) {
+    throw new RangeError(`pinFocusScaleCap: minSidePx must be a finite number > 0, got ${String(minSidePx)}`)
+  }
+  const capHundredths = Math.floor((Math.min(w, h) * SCALE_HUNDREDTHS) / minSidePx)
+  return clamp(capHundredths / SCALE_HUNDREDTHS, PIN_FOCUS_SCALE_MIN, PIN_FOCUS_SCALE_MAX)
+}
+
 module.exports = {
   deadPickPaths,
   deadPickPathsByKind,
@@ -429,4 +700,11 @@ module.exports = {
   GOOGLE_FETCH_ERROR_REASON_PREFIX,
   URL_DEAD_REASONS,
   URL_DEAD_REASON_PREFIX,
+  normalizePinFocus,
+  parsePinFocus,
+  pinFocusKey,
+  pinCropRect,
+  pinFocusScaleCap,
+  PIN_FOCUS_SCALE_MIN,
+  PIN_FOCUS_SCALE_MAX,
 }
