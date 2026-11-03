@@ -6,7 +6,8 @@ const {
   deadPickPaths, deadPickPathsByKind, liveImageRef, pickAtPath, pickRef, pictureState, queueDeadPickPaths,
   VENUE_IMAGE_PROVIDERS, GOOGLE_UNMATCHED_REASONS, GOOGLE_FETCH_ERROR_REASON_PREFIX,
   URL_DEAD_REASONS, URL_DEAD_REASON_PREFIX,
-  normalizePinFocus, pinFocusKey, pinCropRect, PIN_FOCUS_SCALE_MIN, PIN_FOCUS_SCALE_MAX,
+  normalizePinFocus, parsePinFocus, pinFocusKey, pinCropRect, pinFocusScaleCap,
+  PIN_FOCUS_SCALE_MIN, PIN_FOCUS_SCALE_MAX,
 } = contract
 
 const g = (ref, extra = {}) => ({ source: "google", photoName: `places/P/photos/${ref}/media`, ...extra })
@@ -376,16 +377,18 @@ test("the export surface is the rule functions, the vocabularies and the pin-foc
     "deadPickPathsByKind",
     "liveImageRef",
     "normalizePinFocus",
+    "parsePinFocus",
     "pickAtPath",
     "pickRef",
     "pictureState",
     "pinCropRect",
     "pinFocusKey",
+    "pinFocusScaleCap",
     "queueDeadPickPaths",
   ])
   const fns = [
     deadPickPaths, deadPickPathsByKind, liveImageRef, pickAtPath, pickRef, pictureState, queueDeadPickPaths,
-    normalizePinFocus, pinFocusKey, pinCropRect,
+    normalizePinFocus, parsePinFocus, pinFocusKey, pinCropRect, pinFocusScaleCap,
   ]
   for (const fn of fns) assert.equal(typeof fn, "function")
 })
@@ -1034,5 +1037,119 @@ test("pinCropRect: a tiny source at scale 3 still cuts at least one pixel", () =
 test("pinCropRect: width or height below 1 is a RangeError — the one throw in the pin-focus API", () => {
   for (const [w, h] of [[0, 300], [400, 0], [-1, 300], [0.5, 300], [NaN, 300], [400, Infinity], ["400", 300], [undefined, 300]]) {
     assert.throws(() => pinCropRect(w, h, null), RangeError, `${w}×${h}`)
+  }
+})
+
+test("every runtime export has a declaration in index.d.ts, and nothing is declared that is not exported", () => {
+  const dts = require("node:fs").readFileSync(require("node:path").join(__dirname, "index.d.ts"), "utf8")
+  const declared = [...dts.matchAll(/^export (?:declare )?(?:function|const) (\w+)/gm)].map((m) => m[1]).sort()
+  assert.deepEqual(declared, Object.keys(contract).sort())
+})
+
+// ————————————————————————— pin focus: the fix round —————————————————————————
+
+test("normalizePinFocus: a throwing getter or a revoked Proxy is garbage → null, never a throw", () => {
+  const throwing = { get x() { throw new Error("boom") }, y: 0.4 }
+  const { proxy, revoke } = Proxy.revocable({ x: 0.2, y: 0.4 }, {})
+  revoke()
+  assert.equal(normalizePinFocus(throwing), null)
+  assert.equal(normalizePinFocus(proxy), null)
+  assert.equal(pinFocusKey(proxy), "")
+  assert.deepEqual(pinCropRect(400, 300, proxy), pinCropRect(400, 300, null))
+})
+
+test("parsePinFocus: a valid focal → ok with the canonical focal", () => {
+  assert.deepEqual(parsePinFocus({ x: 0.2, y: 0.4, scale: 2 }), { ok: true, focus: { x: 0.2, y: 0.4, scale: 2 } })
+  assert.deepEqual(parsePinFocus({ x: 0.12345, y: 1, scale: null }), { ok: true, focus: { x: 0.123, y: 1, scale: 1 } })
+  assert.deepEqual(parsePinFocus({ x: 0, y: 0, scale: 3, extra: 1 }), { ok: true, focus: { x: 0, y: 0, scale: 3 } })
+})
+
+test("parsePinFocus: the default, null and undefined are a VALID reset → ok with focus null", () => {
+  assert.deepEqual(parsePinFocus({ x: 0.5, y: 0.5, scale: 1 }), { ok: true, focus: null })
+  assert.deepEqual(parsePinFocus({ x: 0.5, y: 0.5 }), { ok: true, focus: null })
+  assert.deepEqual(parsePinFocus(null), { ok: true, focus: null })
+  assert.deepEqual(parsePinFocus(undefined), { ok: true, focus: null })
+})
+
+test("parsePinFocus: garbage is REFUSED, naming the first bad field — never coerced, never clamped", () => {
+  const cases = [
+    [0, "not_an_object"], ["0.3,0.4", "not_an_object"], [true, "not_an_object"], [[0.3, 0.4], "not_an_object"],
+    [() => 0, "not_an_object"],
+    [{}, "x"], [{ x: "0.3", y: 0.4 }, "x"], [{ x: NaN, y: 0.4 }, "x"], [{ x: -0.1, y: 0.4 }, "x"], [{ x: 1.2, y: 0.4 }, "x"],
+    [{ x: 0.3 }, "y"], [{ x: 0.3, y: Infinity }, "y"], [{ x: 0.3, y: 2 }, "y"],
+    [{ x: 0.3, y: 0.4, scale: "2" }, "scale"], [{ x: 0.3, y: 0.4, scale: NaN }, "scale"],
+    [{ x: 0.3, y: 0.4, scale: 0.5 }, "scale"], [{ x: 0.3, y: 0.4, scale: 3.5 }, "scale"],
+    [{ x: "a", y: "b", scale: "c" }, "x"],
+  ]
+  for (const [input, reason] of cases) {
+    assert.deepEqual(parsePinFocus(input), { ok: false, reason }, JSON.stringify(input) ?? String(input))
+  }
+})
+
+test("parsePinFocus: a throwing getter names its field; a revoked Proxy is not an object", () => {
+  assert.deepEqual(parsePinFocus({ x: 0.2, get y() { throw new Error("boom") } }), { ok: false, reason: "y" })
+  const { proxy, revoke } = Proxy.revocable({ x: 0.2, y: 0.4 }, {})
+  revoke()
+  assert.deepEqual(parsePinFocus(proxy), { ok: false, reason: "not_an_object" })
+})
+
+test("parsePinFocus and normalizePinFocus agree on every focal parse accepts", () => {
+  for (const f of [{ x: 0.2, y: 0.4, scale: 2 }, { x: 0.5, y: 0.5 }, { x: 1, y: 0, scale: 2.999 }, { x: 0.5004, y: 0.5, scale: 1.004 }]) {
+    const parsed = parsePinFocus(f)
+    assert.equal(parsed.ok, true)
+    assert.deepEqual(parsed.focus, normalizePinFocus(f))
+  }
+})
+
+test("pinCropRect: a Symbol width is a RangeError, not a TypeError from building the message", () => {
+  assert.throws(() => pinCropRect(Symbol("w"), 300, null), RangeError)
+  assert.throws(() => pinCropRect(400, Symbol("h"), null), RangeError)
+})
+
+test("pinCropRect: side floors in INTEGER math — 535 at scale 1.07 is 500, not 499", () => {
+  assert.equal(pinCropRect(535, 535, { x: 0.5, y: 0.5, scale: 1.07 }).side, 500)
+  // Pairs float division got one pixel short.
+  for (const [min, scale, side] of [[28, 1.12, 25], [33, 1.1, 30], [34, 1.36, 25], [55, 1.1, 50], [81, 1.35, 60]]) {
+    assert.equal(pinCropRect(min, min, { x: 0.5, y: 0.6, scale }).side, side, `${min} @ ${scale}`)
+    assert.equal(pinCropRect(min * 2, min, { x: 0.5, y: 0.6, scale }).side, side, `${min * 2}×${min} @ ${scale}`)
+  }
+})
+
+test("pinCropRect: on the whole 2 dp scale grid, side is the LARGEST square scale times which fits", () => {
+  // side·scale ≤ min < (side + 1)·scale, checked in hundredths so the test itself has no float error.
+  const mins = []
+  for (let m = 1; m <= 5000; m += m < 600 ? 1 : 37) mins.push(m)
+  for (const min of mins) {
+    for (let s100 = 100; s100 <= 300; s100++) {
+      const { side } = pinCropRect(min, min, { x: 0.3, y: 0.6, scale: s100 / 100 })
+      if (min * 100 < s100) {
+        assert.equal(side, 1, `${min} @ ${s100}`)
+        continue
+      }
+      assert.ok(side * s100 <= min * 100 && (side + 1) * s100 > min * 100, `${min} @ ${s100} → ${side}`)
+    }
+  }
+})
+
+test("pinFocusScaleCap: the zoom that still leaves minSidePx source pixels, within [1, 3], 2 dp", () => {
+  assert.equal(pinFocusScaleCap(400, 267, 96), 2.78)
+  // 133 / 96 = 1.3854…: FLOORED to 1.38, because 1.39 would cut floor(133 / 1.39) = 95 px < 96.
+  assert.equal(pinFocusScaleCap(400, 133, 96), 1.38)
+  assert.equal(pinFocusScaleCap(267, 400, 96), 2.78)
+  assert.equal(pinFocusScaleCap(4032, 3024, 96), 3)
+  assert.equal(pinFocusScaleCap(50, 50, 96), 1)
+  assert.equal(pinFocusScaleCap(96, 96, 96), 1)
+})
+
+test("pinFocusScaleCap: at the cap the cut keeps ≥ minSidePx whenever the source has that many", () => {
+  for (let min = 96; min <= 1200; min++) {
+    const cap = pinFocusScaleCap(min + 50, min, 96)
+    assert.ok(pinCropRect(min + 50, min, { x: 0.3, y: 0.3, scale: cap }).side >= 96, `${min} @ ${cap}`)
+  }
+})
+
+test("pinFocusScaleCap: impossible dimensions or minSidePx are a RangeError", () => {
+  for (const args of [[0, 300, 96], [400, NaN, 96], [400, 300, 0], [400, 300, -1], [400, 300, Infinity], [400, 300, "96"], [Symbol("w"), 300, 96]]) {
+    assert.throws(() => pinFocusScaleCap(...args), RangeError, String(args[0]) + "×" + String(args[1]) + " / " + String(args[2]))
   }
 })
