@@ -470,19 +470,33 @@ function clamp(value, min, max) {
 }
 
 /**
- * Half-up rounding to `places` decimals: `Math.round(v · 10^p) / 10^p`, never `toFixed` (which
- * returns a string and rounds the binary value, not the decimal one). Inputs here are already
- * clamped ≥ 0, so no `-0` escapes.
+ * Rounds to `places` decimals as `Math.round(v · 10^p) / 10^p` — half-up on the BINARY product
+ * `v · 10^p`, not on the decimal spelling: 1.005 → 1 (1.005 · 100 = 100.4999…) and 1.015 → 1.01.
+ * Never `toFixed`, which rounds differently (2.505 → "2.50", here 2.51). The trailing `+ 0` turns
+ * a `-0` (which JSON.parse keeps, and the strict reader does not clamp away) into `+0`, so no `-0`
+ * escapes either reader. Part of the frozen key format — see {@link pinFocusKey}.
  */
 function roundTo(value, places) {
   const factor = 10 ** places
-  return Math.round(value * factor) / factor
+  return Math.round(value * factor) / factor + 0
 }
 
-/** A pixel dimension ≥ 1, floored — or a RangeError. The message never coerces (a Symbol must not TypeError). */
+/**
+ * The largest pixel dimension the cut accepts: `min(w, h) · 100` must stay a safe integer, or the
+ * side overflows to Infinity (from ≈ 1.8e306) and loses integer precision well before that.
+ */
+const PIXEL_DIMENSION_MAX = Math.floor(Number.MAX_SAFE_INTEGER / SCALE_HUNDREDTHS)
+
+/**
+ * A pixel dimension in [1, {@link PIXEL_DIMENSION_MAX}], floored — or a RangeError. The message
+ * never coerces (a Symbol must not TypeError).
+ */
 function pixelDimension(value, fn, name) {
   if (!isFiniteNumber(value) || value < 1) {
     throw new RangeError(`${fn}: ${name} must be a finite number ≥ 1, got ${String(value)}`)
+  }
+  if (Math.floor(value) > PIXEL_DIMENSION_MAX) {
+    throw new RangeError(`${fn}: ${name} must be ≤ ${PIXEL_DIMENSION_MAX} (MAX_SAFE_INTEGER / 100), got ${String(value)}`)
   }
   return Math.floor(value)
 }
@@ -594,6 +608,10 @@ function parsePinFocus(input) {
  * keys its preview with it. Equal focals give BYTE-IDENTICAL keys however they were spelled, and a
  * pick without a focal keys to nothing, so every pin cut before focals existed keeps its version.
  * Build keys with this, never by formatting the numbers yourself.
+ *
+ * The format and its rounding are a FROZEN wire contract: changing either re-keys and re-cuts every
+ * focalled pin and makes every device refetch it — a MAJOR version, shipped with a bump of the API's
+ * `VENUE_PIN_RENDER_REV`.
  * @param {unknown} focus
  * @returns {string}
  */
@@ -623,8 +641,9 @@ function cropOffset(at, length, side) {
  * focal near an edge slides it flush against that edge rather than off it. It does NOT apply
  * {@link pinFocusScaleCap} — the caller clamps the scale to the cap first when it wants one.
  *
- * Fractional dimensions are floored. A `width` or `height` that is not a finite number ≥ 1 throws a
- * RangeError — there is no square to cut, and the caller has measured the wrong thing.
+ * Fractional dimensions are floored. A `width` or `height` that is not a finite number ≥ 1, or that
+ * is above `MAX_SAFE_INTEGER / 100` (≈ 9.007e13, where the integer side math stops being exact),
+ * throws a RangeError — there is no square to cut, and the caller has measured the wrong thing.
  * @param {number} width
  * @param {number} height
  * @param {unknown} focus
@@ -651,8 +670,8 @@ function pinCropRect(width, height, focus) {
  * whatever copy an editor displays. The CC slider caps at `pinFocusScaleCap(w, h, 96)`, and the API
  * clamps the stored scale to the same cap at cut time.
  *
- * Throws a RangeError for a `width` or `height` that is not a finite number ≥ 1, or a `minSidePx`
- * that is not a finite number > 0.
+ * Throws a RangeError for a `width` or `height` that is not a finite number ≥ 1 or is above
+ * `MAX_SAFE_INTEGER / 100`, or a `minSidePx` that is not a finite number > 0.
  * @param {number} width
  * @param {number} height
  * @param {number} minSidePx

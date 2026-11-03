@@ -282,7 +282,7 @@ export function pinFocusKey(focus: unknown): string
  * focal is normalized first, so `null`, the default or garbage cuts the centred square. Fractional
  * dimensions are floored. Does not apply `pinFocusScaleCap`.
  *
- * @throws {RangeError} when `width` or `height` is not a finite number ≥ 1.
+ * @throws {RangeError} when `width` or `height` is not a finite number ≥ 1, or is above `MAX_SAFE_INTEGER / 100`.
  */
 export function pinCropRect(width: number, height: number, focus: unknown): PinCropRect
 
@@ -292,7 +292,7 @@ export function pinCropRect(width: number, height: number, focus: unknown): PinC
  * the cap never falls below `minSidePx` when the source has that many pixels. The CC slider caps at
  * `pinFocusScaleCap(w, h, 96)`; the API clamps the stored scale to the same cap at cut time.
  *
- * @throws {RangeError} when `width` or `height` is not a finite number ≥ 1, or `minSidePx` is not a
+ * @throws {RangeError} when `width` or `height` is not a finite number ≥ 1 or is above `MAX_SAFE_INTEGER / 100`, or `minSidePx` is not a
  * finite number > 0.
  */
 export function pinFocusScaleCap(width: number, height: number, minSidePx: number): number

@@ -1153,3 +1153,43 @@ test("pinFocusScaleCap: impossible dimensions or minSidePx are a RangeError", ()
     assert.throws(() => pinFocusScaleCap(...args), RangeError, String(args[0]) + "×" + String(args[1]) + " / " + String(args[2]))
   }
 })
+
+test("parsePinFocus: a -0 read from JSON comes back +0, the same canonical form normalizePinFocus gives", () => {
+  const input = JSON.parse('{"x":-0,"y":0.3,"scale":2}')
+  const parsed = parsePinFocus(input)
+  assert.equal(parsed.ok, true)
+  assert.ok(Object.is(parsed.focus.x, 0), JSON.stringify(parsed))
+  assert.deepStrictEqual(parsed.focus, normalizePinFocus(input))
+  assert.ok(Object.is(parsePinFocus({ x: 0.3, y: -0, scale: 2 }).focus.y, 0))
+})
+
+test("pinFocusKey: the key format and its rounding are a FROZEN wire contract", () => {
+  assert.equal(pinFocusKey({ x: 0.25, y: 0.75, scale: 2.5 }), "f:0.25,0.75,2.5")
+  // 2.505 · 100 = 250.5 exactly → 251; toFixed(2) would give "2.50".
+  assert.equal(pinFocusKey({ x: 0.25, y: 0.75, scale: 2.505 }), "f:0.25,0.75,2.51")
+  assert.equal(pinFocusKey({ x: 0.12345, y: 0.98765, scale: 1.23456 }), "f:0.123,0.988,1.23")
+  assert.equal(pinFocusKey({ x: 0.5, y: 0.5, scale: 1 }), "")
+})
+
+test("rounding happens on the BINARY product v · 10^p — 1.005 → 1, 1.015 → 1.01", () => {
+  // 1.005 · 100 = 100.49999999999999 and 1.015 · 100 = 101.49999999999999 in binary, so both round down.
+  assert.equal(normalizePinFocus({ x: 0.25, y: 0.75, scale: 1.005 }).scale, 1)
+  assert.equal(normalizePinFocus({ x: 0.25, y: 0.75, scale: 1.015 }).scale, 1.01)
+  assert.equal(pinFocusKey({ x: 0.25, y: 0.75, scale: 1.005 }), "f:0.25,0.75,1")
+  assert.equal(pinFocusKey({ x: 0.25, y: 0.75, scale: 1.015 }), "f:0.25,0.75,1.01")
+})
+
+test("pinCropRect / pinFocusScaleCap: a dimension above MAX_SAFE_INTEGER / 100 is a RangeError, never ±Infinity", () => {
+  assert.throws(() => pinCropRect(1e307, 1e307, null), RangeError)
+  assert.throws(() => pinCropRect(Number.MAX_SAFE_INTEGER, 300, null), RangeError)
+  assert.throws(() => pinCropRect(400, Number.MAX_SAFE_INTEGER, { x: 0.2, y: 0.2, scale: 2 }), RangeError)
+  assert.throws(() => pinFocusScaleCap(1e307, 1e307, 96), RangeError)
+  assert.deepEqual(pinCropRect(65536, 65536, null), { left: 0, top: 0, side: 65536 })
+  assert.deepEqual(pinCropRect(65536, 65536, { x: 0.25, y: 0.75, scale: 2 }), { left: 0, top: 32768, side: 32768 })
+})
+
+test("pinCropRect: fractional dimensions are floored — 400.9 × 133.9 cuts exactly what 400 × 133 cuts", () => {
+  for (const focus of [null, { x: 1, y: 1, scale: 1 }, { x: 0.3, y: 0.6, scale: 1.38 }, { x: 0.9, y: 0.1, scale: 3 }]) {
+    assert.deepEqual(pinCropRect(400.9, 133.9, focus), pinCropRect(400, 133, focus), JSON.stringify(focus))
+  }
+})

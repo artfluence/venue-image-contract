@@ -214,7 +214,7 @@ pinFocus: { x: 0.25, y: 0.6, scale: 2 }   // absent or null = the centred square
 | `x`, `y` | `[0, 1]` of the **oriented** image | 3 dp | required |
 | `scale` | `[1, 3]` — the square's side is the short side ÷ `scale` | 2 dp | `1` |
 
-Rounding is `Math.round(v · 10^p) / 10^p` — half-up on the number, never `toFixed` (which returns a string and rounds the binary value).
+Rounding is `Math.round(v · 10^p) / 10^p` — half-up on the **binary product** `v · 10^p`, not on the decimal you typed: `1.005` → `1` (`1.005 · 100` is `100.4999…` in binary) and `1.015` → `1.01`. Never `toFixed`, which returns a string and rounds differently (`2.505` → `"2.50"`; here `2.51`). A `-0` reads as `0`.
 
 **Orientation.** `x` / `y` refer to the **oriented** image — after EXIF auto-orient, the photo as a browser shows it. The API must take the dimensions it cuts in from sharp's `metadata().autoOrient` (not the raw `width` / `height`, which are pre-rotation), and the CC editor shows the oriented photo, as browsers do by default. A pin cut in raw space from a focal set in oriented space lands on the wrong part of a rotated photo.
 
@@ -237,6 +237,8 @@ Both return the same canonical form: rounded, `scale` always spelled out, no oth
 
 **`pinFocusKey(focus)`** is `""` when the focal normalizes to `null`, else `f:${x},${y},${scale}` of the normalized focal in JavaScript's shortest number spelling — `f:0.25,0.6,2`, never `0.250` or `2.00`. Equal focals give **byte-identical** keys however they were spelled. Build keys with it; never format the numbers by hand.
 
+**The key format and its rounding are a frozen wire contract.** Changing either re-keys and re-cuts every focalled pin and makes every device refetch it, so it is a **MAJOR** version change, and the API bumps `VENUE_PIN_RENDER_REV` with it.
+
 **When the key is empty, the API appends NOTHING** to the pin's coverVersion input or blob key and keeps its existing single-pass centre cut — so no existing pin re-keys or changes bytes. Only a non-empty key is appended (`${base}|${key}`), and only a focalled pin takes the focal cut below.
 
 ### The cut
@@ -249,7 +251,7 @@ left = clamp(round(x * width  - side / 2), 0, width  - side)
 top  = clamp(round(y * height - side / 2), 0, height - side)
 ```
 
-The side is floored in integer hundredths, so it is exactly the largest square `scale` times which fits the short side (float division puts `535 / 1.07` at 499.99… and cuts 499; this cuts 500). The focal is normalized first, so a `null`, default or malformed focal cuts the centred square and an out-of-range one clamps. The square never leaves the image: a focal near an edge slides it flush against that edge. Fractional dimensions are floored; a `width` or `height` that is not a finite number ≥ 1 throws a `RangeError`.
+The side is floored in integer hundredths, so it is exactly the largest square `scale` times which fits the short side (float division puts `535 / 1.07` at 499.99… and cuts 499; this cuts 500). The focal is normalized first, so a `null`, default or malformed focal cuts the centred square and an out-of-range one clamps. The square never leaves the image: a focal near an edge slides it flush against that edge. Fractional dimensions are floored; a `width` or `height` that is not a finite number ≥ 1, or is above `Number.MAX_SAFE_INTEGER / 100` (≈ 9.007e13, past which `min(width, height) · 100` is no longer an exact integer and overflows to `Infinity` from ≈ 1.8e306), throws a `RangeError` — `pinFocusScaleCap` too.
 
 ### The resolution cap
 
